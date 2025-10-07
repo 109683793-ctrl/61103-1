@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D 跑酷挑戰</title>
+    <!-- 使用 Inter 字體 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Tone.js 用於音效 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background-color: #e0f2f1; /* 淺綠松石背景 */
+            font-family: 'Inter', sans-serif;
+            padding: 20px;
+        }
+        .game-container {
+            background-color: #ffffff;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+            padding: 20px;
+            text-align: center;
+            width: 95%;
+            max-width: 1850px; /* 配合更大的畫布 */
+        }
+        #gameCanvas {
+            border: 3px solid #004d40; /* 深綠松石邊框 */
+            background-color: #b2dfdb; /* 淺綠松石內部 */
+            display: block;
+            margin: 20px auto;
+            border-radius: 10px;
+            touch-action: manipulation; /* 確保觸摸設備響應 */
+        }
+        .controls, .game-info {
+            display: flex;
+            justify-content: space-around;
+            margin-top: 15px;
+            gap: 10px;
+        }
+        button {
+            background-color: #00796b; /* 主綠松石色 */
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-weight: 700;
+            transition: background-color 0.3s, transform 0.1s;
+            box-shadow: 0 4px #004d40;
+        }
+        button:hover {
+            background-color: #00897b;
+        }
+        button:active {
+            background-color: #004d40;
+            transform: translateY(2px);
+            box-shadow: 0 2px #004d40;
+        }
+        .score-display, .message-box {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #004d40;
+            padding: 10px;
+            border-radius: 8px;
+            background-color: #e0f2f1;
+        }
+        .message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 30px;
+            background-color: rgba(255, 255, 255, 0.95);
+            border: 5px solid #ff9800;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            border-radius: 15px;
+            font-size: 1.5rem;
+            color: #d84315;
+            z-index: 100;
+            display: none; /* 初始隱藏 */
+        }
+        @media (max-width: 600px) {
+            .controls button {
+                padding: 10px 20px;
+                font-size: 1rem;
+            }
+            .controls {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">2D 跑酷挑戰</h1>
+        <canvas id="gameCanvas"></canvas>
+        <div class="game-info">
+            <div class="score-display">分數: <span id="scoreValue">0</span></div>
+            <div class="score-display">最高分: <span id="highScoreValue">0</span></div>
+        </div>
+        <div class="controls">
+            <button id="startButton">開始遊戲 / 重新開始</button>
+            <button id="jumpButton" disabled>跳躍 / 四段跳 (Space)</button>
+        </div>
+    </div>
+
+    <!-- 遊戲訊息框 -->
+    <div id="messageBox" class="message-box">
+        <p id="messageText"></p>
+        <button onclick="hideMessage()" style="margin-top: 20px; background-color: #ff9800; box-shadow: 0 4px #e65100;">確認</button>
+    </div>
+
+    <script>
+        // Firebase 相關變數和初始化
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // 遊戲主邏輯
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreValue = document.getElementById('scoreValue');
+        const highScoreValue = document.getElementById('highScoreValue');
+        const startButton = document.getElementById('startButton');
+        const jumpButton = document.getElementById('jumpButton');
+        const messageBox = document.getElementById('messageBox');
+        const messageText = document.getElementById('messageText');
+
+        // 畫布尺寸已擴大: 1800x450 (寬度再次加大)
+        const CANVAS_WIDTH = 1800; 
+        const CANVAS_HEIGHT = 450; 
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+
+        // 遊戲狀態
+        let gameRunning = false;
+        let score = 0;
+        let highScore = parseInt(localStorage.getItem('parkourHighScore') || '0', 10);
+        highScoreValue.textContent = highScore;
+        let animationFrameId;
+
+        // Tone.js 音頻設定
+        let jumpSynth;
+        let collisionSynth;
+        let audioContextStarted = false;
+
+        // 設置 Tone.js 音效
+        function setupAudio() {
+            if (typeof Tone === 'undefined') return;
+
+            // 簡單合成器用於跳躍音 (快速，高音)
+            jumpSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "triangle" },
+                envelope: { attack: 0.01, decay: 0.1, sustain: 0.0, release: 0.1 },
+            }).toDestination();
+
+            // 噪音合成器用於碰撞音 (尖銳，短爆發)
+            collisionSynth = new Tone.NoiseSynth({
+                noise: { type: 'white' },
+                envelope: { attack: 0.01, decay: 0.2, sustain: 0, release: 0.1 },
+            }).toDestination();
+        }
+
+        // 玩家設定 (保持尺寸作為碰撞框，但外觀會繪製成幾何造型)
+        const player = {
+            x: 50,
+            y: CANVAS_HEIGHT - 40, // 初始位置基於新的畫布高度
+            width: 20, // 碰撞寬度
+            height: 40, // 碰撞高度
+            color: '#ff5722', // 深橙色，更具活力 (已更新)
+            vy: 0, // 垂直速度
+            gravity: 0.8,
+            jumpStrength: -18, // 增加跳躍力度，適應更高的畫布
+            isJumping: false,
+            maxJumps: 4, // 允許最多四次跳躍 (已更新為四段跳)
+            jumpCount: 0, // 當前已跳躍次數
+        };
+
+        // 障礙物設定
+        let obstacles = [];
+        let obstacleSpeed = 5;
+        let obstacleGenerationInterval = 100; // 初始障礙物生成計時器
+        let obstacleTimer = 0;
+        
+        // 背景設定 
+        let backgroundElements = [];
+        const BACKGROUND_SPEED_MULTIPLIER = 0.3; // 視差效果 (Parallax)
+
+        // 障礙物類型配置
+        const OBSTACLE_TYPES = [
+            // 類型 1: 低矮障礙物 (綠色, 正常跳躍)
+            { 
+                height: 30, 
+                widthMin: 15, 
+                widthMax: 30, 
+                color: '#388e3c' 
+            },
+            // 類型 2: 高牆障礙物 (紅色, 需要精確跳躍)
+            { 
+                height: 50, // 稍微高於玩家，挑戰性更大
+                widthMin: 20, 
+                widthMax: 40, 
+                color: '#d32f2f' // 紅色
+            } 
+        ];
+
+
+        // 繪製玩家 (NEW: 動感膠囊跑者，帶動畫和特效)
+        function drawPlayer() {
+            const runnerColor = player.color; // #ff5722 (深橙色)
+            const centerX = player.x + player.width / 2;
+            const bottomY = player.y + player.height;
+            
+            ctx.save();
+            
+            // ====== 動畫變形 (Animation and Tilt) ======
+            let tilt = 0;
+            let bounceOffset = 0;
+            
+            if (player.isJumping) {
+                // 跳躍時輕微向後傾斜 (根據上升或下降微調)
+                tilt = player.vy > 0 ? 0.1 : -0.1; 
+            } else {
+                // 跑步時向前傾斜並添加輕微彈跳
+                tilt = 0.05;
+                // 輕微的跑步彈跳 (與分數/速度相關，製造動態感)
+                bounceOffset = Math.sin(score / 3) * 1; 
+            }
+            
+            // 將座標原點移動到角色的底部中心，進行旋轉和平移
+            ctx.translate(centerX, bottomY);
+            ctx.rotate(tilt);
+            ctx.translate(-centerX, -bottomY + bounceOffset); 
+
+            // ====== 繪製角色 (Rounded Capsule) ======
+            const bodyWidth = 16;
+            const bodyHeight = 36;
+            const bodyX = centerX - bodyWidth / 2;
+            const bodyY = bottomY - bodyHeight;
+            const radius = 8; // 圓角半徑
+            
+            // 1. 身體主體 (Rounded Rectangle)
+            ctx.beginPath();
+            // 使用 Path 繪製圓角矩形
+            ctx.moveTo(bodyX + radius, bodyY);
+            ctx.lineTo(bodyX + bodyWidth - radius, bodyY);
+            ctx.arcTo(bodyX + bodyWidth, bodyY, bodyX + bodyWidth, bodyY + radius, radius);
+            ctx.lineTo(bodyX + bodyWidth, bodyY + bodyHeight - radius);
+            ctx.arcTo(bodyX + bodyWidth, bodyY + bodyHeight, bodyX + bodyWidth - radius, bodyY + bodyHeight, radius);
+            ctx.lineTo(bodyX + radius, bodyY + bodyHeight);
+            ctx.arcTo(bodyX, bodyY + bodyHeight, bodyX, bodyY + bodyHeight - radius, radius);
+            ctx.lineTo(bodyX, bodyY + radius);
+            ctx.arcTo(bodyX, bodyY, bodyX + radius, bodyY, radius);
+            ctx.closePath();
+            
+            ctx.fillStyle = runnerColor;
+            ctx.fill();
+            
+            // 2. 內部細節 (增加層次感)
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            ctx.fillRect(bodyX + 2, bodyY + 2, bodyWidth - 4, 3); // 頂部亮點
+            
+            // ====== 四段跳特效 (Jump Trail/Glow) ======
+            // 只有在第一次跳躍後 (但未落地) 且尚未用完所有跳躍時顯示光暈
+            if (player.jumpCount > 0 && player.jumpCount < player.maxJumps) {
+                 // 根據剩餘跳躍次數調整光暈顏色和強度 (4 - jumpCount)
+                 const jumpsUsed = player.jumpCount; 
+                 let glowColor = 'rgba(76, 175, 80, 0.8)'; // 綠色 (默認)
+                 let glowBlur = 12;
+
+                 if (jumpsUsed === 1) {
+                     glowColor = 'rgba(255, 193, 7, 0.8)'; // 黃色光暈 (剩餘 3 次)
+                     glowBlur = 10;
+                 } else if (jumpsUsed === 2) {
+                     glowColor = 'rgba(33, 150, 243, 0.8)'; // 藍色光暈 (剩餘 2 次)
+                     glowBlur = 12;
+                 } else if (jumpsUsed === 3) {
+                     glowColor = 'rgba(156, 39, 176, 0.8)'; // 紫色光暈 (剩餘 1 次)
+                     glowBlur = 14;
+                 }
+
+
+                 ctx.shadowColor = glowColor; 
+                 ctx.shadowBlur = glowBlur;
+                 // 繪製一個透明但有高斯模糊陰影的矩形，製造光暈效果
+                 ctx.fillStyle = 'rgba(76, 175, 80, 0.0)'; 
+                 ctx.fillRect(bodyX - 5, bodyY - 5, bodyWidth + 10, bodyHeight + 10);
+            }
+            
+            // 必須在 restore 之前清除 shadow 屬性，避免影響後續繪製
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = 'transparent';
+
+            ctx.restore(); // 恢復畫布狀態，取消旋轉和位移
+            
+            // 繪製地面陰影（非旋轉部分，增加懸浮感）
+            if (!player.isJumping) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+                ctx.beginPath();
+                ctx.ellipse(centerX, CANVAS_HEIGHT - 2, 8, 2, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // 更新玩家位置 (跳躍邏輯)
+        function updatePlayer() {
+            // 檢查是否在空中 (isJumping 或實際位置高於地面)
+            if (player.isJumping || player.y < CANVAS_HEIGHT - player.height) { 
+                player.vy += player.gravity;
+                player.y += player.vy;
+
+                // 碰到地面 (CANVAS_HEIGHT - player.height)
+                if (player.y >= CANVAS_HEIGHT - player.height) {
+                    player.y = CANVAS_HEIGHT - player.height;
+                    player.isJumping = false;
+                    player.vy = 0;
+                    player.jumpCount = 0; // 重置跳躍計數
+                }
+            }
+        }
+
+        // 玩家跳躍 (實現四段跳)
+        async function jump() {
+            // 允許跳躍的條件：遊戲運行中 AND (還有剩餘跳躍次數 < maxJumps)
+            if (gameRunning && player.jumpCount < player.maxJumps) {
+                // 確保 Tone.js 音頻上下文已啟動
+                if (!audioContextStarted && typeof Tone !== 'undefined') {
+                    await Tone.start();
+                    audioContextStarted = true;
+                }
+
+                // 只有第一次跳躍才需要設置 isJumping 
+                if (player.jumpCount === 0) {
+                    player.isJumping = true;
+                }
+                
+                player.vy = player.jumpStrength;
+                player.jumpCount++; // 增加跳躍次數
+                
+                // 播放跳躍音效 (根據跳躍次數改變音高實現四段跳)
+                if (jumpSynth) {
+                    // 四段跳的音高，每次跳躍音高都不同
+                    const jumpNotes = ["C5", "E5", "G5", "C6"]; 
+                    const noteIndex = player.jumpCount - 1; // 0, 1, 2, 3
+                    
+                    if(noteIndex < jumpNotes.length) {
+                        jumpSynth.triggerAttackRelease(jumpNotes[noteIndex], "8n"); 
+                    }
+                }
+            }
+        }
+
+        // 繪製障礙物
+        function drawObstacle(obstacle) {
+            ctx.fillStyle = obstacle.color;
+            ctx.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
+        }
+
+        // 更新障礙物
+        function updateObstacles() {
+            // 移動障礙物
+            obstacles.forEach(obstacle => {
+                obstacle.x -= obstacleSpeed;
+            });
+
+            // 移除移出畫面的障礙物
+            obstacles = obstacles.filter(obstacle => obstacle.x + obstacle.width > 0);
+
+            // 生成新的障礙物
+            obstacleTimer++;
+            if (obstacleTimer >= obstacleGenerationInterval) {
+                generateObstacle();
+                // 調整生成速度和間隔，讓遊戲變難
+                obstacleSpeed = Math.min(15, obstacleSpeed + 0.1); // 速度上限 15
+                obstacleGenerationInterval = Math.max(50, 100 - score / 20); // 間隔下限 50
+                obstacleTimer = 0;
+            }
+        }
+
+        // 生成障礙物 (隨機生成兩種高度)
+        function generateObstacle() {
+            // 隨機選擇障礙物類型
+            const typeIndex = Math.floor(Math.random() * OBSTACLE_TYPES.length);
+            const type = OBSTACLE_TYPES[typeIndex];
+
+            const width = Math.random() * (type.widthMax - type.widthMin) + type.widthMin;
+
+            obstacles.push({
+                x: CANVAS_WIDTH,
+                y: CANVAS_HEIGHT - type.height,
+                width: width,
+                height: type.height,
+                color: type.color 
+            });
+        }
+
+        // 碰撞檢測 (AABB)
+        function checkCollision() {
+            const p = player;
+            for (const o of obstacles) {
+                // 檢查 X 軸重疊
+                if (p.x < o.x + o.width && p.x + p.width > o.x) {
+                    // 檢查 Y 軸重疊
+                    if (p.y < o.y + o.height && p.y + p.height > o.y) {
+                        return true; // 發生碰撞
+                    }
+                }
+            }
+            return false;
+        }
+
+        // 繪製地面 (增加移動線條)
+        function drawGround() {
+            // 填色地面 (Fill the ground area for better contrast)
+            ctx.fillStyle = '#6d4c41'; // 土棕色
+            ctx.fillRect(0, CANVAS_HEIGHT - 4, CANVAS_WIDTH, 4);
+            
+            // 加入移動線條 (模擬速度感)
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)'; // 淺色線條
+            ctx.lineWidth = 1;
+            const lineSpacing = 20;
+            const lineOffset = (score * obstacleSpeed / 10 * 0.5) % lineSpacing;
+
+            for (let i = 0; i < CANVAS_WIDTH / lineSpacing + 1; i++) {
+                const lineX = (i * lineSpacing - lineOffset);
+                ctx.beginPath();
+                ctx.moveTo(lineX, CANVAS_HEIGHT - 4);
+                ctx.lineTo(lineX + 5, CANVAS_HEIGHT - 2); // 稍微傾斜的線條
+                ctx.stroke();
+            }
+
+            // 邊界線
+            ctx.strokeStyle = '#004d40';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(0, CANVAS_HEIGHT);
+            ctx.lineTo(CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.stroke();
+        }
+
+        // 生成背景元素
+        function generateBackgroundElement() {
+            const minHeight = 10;
+            const maxHeight = 40;
+            const minWidth = 20;
+            const maxWidth = 80;
+            const height = Math.random() * (maxHeight - minHeight) + minHeight;
+            const width = Math.random() * (maxWidth - minWidth) + minWidth;
+            const yOffset = Math.random() * 20; // 稍微的垂直變化
+
+            backgroundElements.push({
+                x: CANVAS_WIDTH,
+                y: CANVAS_HEIGHT - height - 4 - yOffset, // 在地面線上方
+                width: width,
+                height: height,
+                color: 'rgba(56, 142, 60, 0.4)' // 半透明的遠處綠色
+            });
+        }
+        
+        // 更新和繪製背景
+        function updateBackground() {
+            // 以較低頻率生成新的背景元素
+            if (Math.random() < 0.015) { 
+                generateBackgroundElement();
+            }
+
+            // 移動和繪製元素 (使用較慢的速度)
+            backgroundElements.forEach(bg => {
+                bg.x -= obstacleSpeed * BACKGROUND_SPEED_MULTIPLIER;
+                ctx.fillStyle = bg.color;
+                ctx.fillRect(bg.x, bg.y, bg.width, bg.height);
+            });
+
+            // 移除移出畫面的元素
+            backgroundElements = backgroundElements.filter(bg => bg.x + bg.width > 0);
+        }
+
+        // 遊戲迴圈
+        function gameLoop() {
+            if (!gameRunning) return;
+
+            // 清空畫布
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            
+            // 繪製背景元素
+            updateBackground();
+
+            // 繪製地面
+            drawGround();
+
+            // 更新和繪製玩家
+            updatePlayer();
+            drawPlayer();
+
+            // 更新和繪製障礙物
+            updateObstacles();
+            obstacles.forEach(drawObstacle);
+
+            // 碰撞檢測
+            if (checkCollision()) {
+                gameOver();
+                return;
+            }
+
+            // 更新分數
+            score++;
+            scoreValue.textContent = Math.floor(score / 10); // 每 10 幀分數 +1
+
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+        // 遊戲結束 (播放音效)
+        function gameOver() {
+            gameRunning = false;
+            cancelAnimationFrame(animationFrameId);
+            startButton.textContent = '重新開始';
+            jumpButton.disabled = true;
+
+            // 播放碰撞音效
+            if (collisionSynth) {
+                collisionSynth.triggerAttackRelease("8n"); 
+            }
+
+            const finalScore = Math.floor(score / 10);
+            
+            // 更新最高分
+            if (finalScore > highScore) {
+                highScore = finalScore;
+                localStorage.setItem('parkourHighScore', highScore);
+                highScoreValue.textContent = highScore;
+                showMessage(`遊戲結束！\n恭喜您創造了新的最高分: ${highScore}！`);
+            } else {
+                showMessage(`遊戲結束！\n您的分數是: ${finalScore}\n最高分: ${highScore}`);
+            }
+        }
+        
+        // 顯示訊息框
+        function showMessage(text) {
+            messageText.innerHTML = text.replace(/\n/g, '<br>');
+            messageBox.style.display = 'block';
+        }
+
+        // 隱藏訊息框
+        function hideMessage() {
+            messageBox.style.display = 'none';
+        }
+
+        // 重置遊戲狀態 
+        function resetGame() {
+            player.y = CANVAS_HEIGHT - player.height;
+            player.isJumping = false;
+            player.vy = 0;
+            player.jumpCount = 0; // 重置跳躍計數
+
+            obstacles = [];
+            backgroundElements = [];
+            score = 0;
+            scoreValue.textContent = 0;
+            obstacleSpeed = 5;
+            obstacleGenerationInterval = 100;
+            obstacleTimer = 0;
+        }
+
+        // 啟動遊戲
+        function startGame() {
+            if (gameRunning) return;
+
+            resetGame();
+            gameRunning = true;
+            startButton.textContent = '進行中...';
+            jumpButton.disabled = false;
+            gameLoop();
+        }
+
+        // 事件監聽
+        startButton.addEventListener('click', startGame);
+        jumpButton.addEventListener('click', jump);
+
+        // 鍵盤 Space 鍵監聽
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Space' || e.key === ' ') {
+                e.preventDefault(); // 防止滾動頁面
+                jump();
+            }
+        });
+
+        // 觸摸/點擊螢幕進行跳躍
+        canvas.addEventListener('mousedown', jump);
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault(); // 防止滾動頁面
+            jump();
+        });
+
+
+        // 初始繪製
+        window.onload = () => {
+             // 確保 canvas 寬度響應式調整 (雖然核心遊戲尺寸固定，但讓外觀美觀)
+            function resizeCanvasContainer() {
+                const containerWidth = canvas.parentElement.clientWidth;
+                const scale = Math.min(1, containerWidth / CANVAS_WIDTH);
+                canvas.style.width = `${CANVAS_WIDTH * scale}px`;
+                canvas.style.height = `${CANVAS_HEIGHT * scale}px`;
+            }
+            window.addEventListener('resize', resizeCanvasContainer);
+            resizeCanvasContainer();
+
+            // 提示玩家如何開始
+            ctx.fillStyle = '#004d40';
+            ctx.font = '20px Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('點擊「開始遊戲」或按下 Space 鍵開始 / 四段跳', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+
+            // 遊戲開始前，先繪製地面
+            drawGround();
+            
+            // 設置音頻
+            setupAudio();
+        };
+        
+    </script>
+</body>
+</html>
